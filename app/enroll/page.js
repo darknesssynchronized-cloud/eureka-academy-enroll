@@ -1,20 +1,21 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabaseClient';
 
 export default function EnrollPage() {
   const [courses, setCourses] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const [selectedCourseId, setSelectedCourseId] = useState('');
-  const [quantity, setQuantity] = useState('');
+  // เก็บจำนวนที่เลือกของแต่ละคอร์สแบบ { [course_id]: quantity }
+  // ถ้าไม่มี key หรือค่าเป็น 0 = ยังไม่ได้เลือกคอร์สนั้น
+  const [selections, setSelections] = useState({});
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
-  // ดึงรายการคอร์สทั้งหมดมาใช้ใน dropdown
+  // ดึงรายการคอร์สทั้งหมด
   const fetchCourses = async () => {
     setLoading(true);
     const { data, error } = await supabase
@@ -34,18 +35,49 @@ export default function EnrollPage() {
     fetchCourses();
   }, []);
 
-  // คอร์สที่กำลังถูกเลือกอยู่ในปัจจุบัน (ใช้คำนวณยอดรวมและเช็ค stock)
-  const selectedCourse = courses.find((c) => c.id === selectedCourseId);
+  // เปิด/ปิดการเลือกคอร์ส (ติ๊กถูก) — ถ้าเปิดใหม่ ตั้งจำนวนเริ่มต้นเป็น 1
+  const toggleCourse = (courseId) => {
+    setSelections((prev) => {
+      const next = { ...prev };
+      if (next[courseId]) {
+        delete next[courseId];
+      } else {
+        next[courseId] = 1;
+      }
+      return next;
+    });
+  };
 
-  // คำนวณยอดรวม = ราคา x จำนวน (ถ้ากรอกไม่ครบให้เป็น 0)
-  const totalPrice =
-    selectedCourse && quantity && Number(quantity) > 0
-      ? selectedCourse.price * Number(quantity)
-      : 0;
+  // แก้ไขจำนวนที่นั่งของคอร์สที่เลือกไว้
+  const updateQuantity = (courseId, value) => {
+    setSelections((prev) => ({
+      ...prev,
+      [courseId]: value,
+    }));
+  };
+
+  // รายการคอร์สที่ถูกเลือกอยู่ พร้อมข้อมูลคอร์สและยอดรวมย่อยของแต่ละคอร์ส
+  const selectedItems = useMemo(() => {
+    return Object.entries(selections)
+      .map(([courseId, qty]) => {
+        const course = courses.find((c) => c.id === courseId);
+        if (!course) return null;
+        const quantity = Number(qty) || 0;
+        return {
+          course,
+          quantity,
+          subtotal: quantity > 0 ? course.price * quantity : 0,
+        };
+      })
+      .filter(Boolean);
+  }, [selections, courses]);
+
+  // ยอดรวมทั้งหมดจากทุกคอร์สที่เลือก
+  const grandTotal = selectedItems.reduce((sum, item) => sum + item.subtotal, 0);
+  const totalSeats = selectedItems.reduce((sum, item) => sum + item.quantity, 0);
 
   const resetForm = () => {
-    setSelectedCourseId('');
-    setQuantity('');
+    setSelections({});
   };
 
   const handleEnroll = async (e) => {
@@ -53,53 +85,59 @@ export default function EnrollPage() {
     setErrorMsg('');
     setSuccessMsg('');
 
-    // ตรวจสอบข้อมูลเบื้องต้น
-    if (!selectedCourseId) {
-      setErrorMsg('กรุณาเลือกคอร์สที่ต้องการลงทะเบียน');
-      return;
-    }
-    const qty = Number(quantity);
-    if (!qty || qty <= 0) {
-      setErrorMsg('กรุณากรอกจำนวนที่นั่งให้ถูกต้อง');
+    // ต้องเลือกอย่างน้อย 1 คอร์ส และทุกคอร์สที่เลือกต้องกรอกจำนวนมากกว่า 0
+    const itemsToEnroll = selectedItems.filter((item) => item.quantity > 0);
+    if (itemsToEnroll.length === 0) {
+      setErrorMsg('กรุณาเลือกอย่างน้อย 1 คอร์ส และระบุจำนวนที่นั่งให้ถูกต้อง');
       return;
     }
 
     setSubmitting(true);
 
-    // ดึงข้อมูลคอร์สล่าสุดจาก DB อีกครั้งก่อนบันทึก เพื่อกัน stock ไม่ตรงกับที่แสดงบนหน้าจอ
-    const { data: freshCourse, error: fetchError } = await supabase
+    // ดึงข้อมูล stock ล่าสุดของทุกคอร์สที่เลือก เพื่อตรวจสอบก่อนบันทึกจริง
+    const courseIds = itemsToEnroll.map((item) => item.course.id);
+    const { data: freshCourses, error: fetchError } = await supabase
       .from('courses')
       .select('*')
-      .eq('id', selectedCourseId)
-      .single();
+      .in('id', courseIds);
 
-    if (fetchError || !freshCourse) {
-      setErrorMsg('ไม่พบข้อมูลคอร์สนี้ในระบบ กรุณาลองใหม่');
+    if (fetchError || !freshCourses) {
+      setErrorMsg('ไม่สามารถตรวจสอบข้อมูลคอร์สได้ กรุณาลองใหม่');
       setSubmitting(false);
       return;
     }
 
-    // ตรวจสอบว่าที่นั่งคงเหลือเพียงพอหรือไม่
-    if (freshCourse.stock < qty) {
-      setErrorMsg(
-        `ที่นั่งคงเหลือไม่เพียงพอ (เหลือ ${freshCourse.stock} ${freshCourse.unit})`
-      );
+    // ตรวจสอบที่นั่งคงเหลือของทุกคอร์สก่อนบันทึกรายการใดๆ
+    const insufficient = [];
+    for (const item of itemsToEnroll) {
+      const fresh = freshCourses.find((c) => c.id === item.course.id);
+      if (!fresh || fresh.stock < item.quantity) {
+        insufficient.push(
+          `${item.course.name} (เหลือ ${fresh ? fresh.stock : 0} ${item.course.unit})`
+        );
+      }
+    }
+    if (insufficient.length > 0) {
+      setErrorMsg('ที่นั่งคงเหลือไม่เพียงพอสำหรับ: ' + insufficient.join(', '));
       setSubmitting(false);
       return;
     }
 
-    const total = freshCourse.price * qty;
+    const enrolledAt = new Date().toISOString();
 
-    // 1. บันทึกรายการลงตาราง enrollments
-    const { error: insertError } = await supabase.from('enrollments').insert([
-      {
-        course_id: freshCourse.id,
-        course_name: freshCourse.name,
-        quantity: qty,
-        total_price: total,
-        enrolled_at: new Date().toISOString(),
-      },
-    ]);
+    // บันทึกลง enrollments ทีละคอร์ส (1 แถวต่อ 1 คอร์ส ตามโครงสร้างตารางเดิม)
+    const rowsToInsert = itemsToEnroll.map((item) => {
+      const fresh = freshCourses.find((c) => c.id === item.course.id);
+      return {
+        course_id: fresh.id,
+        course_name: fresh.name,
+        quantity: item.quantity,
+        total_price: fresh.price * item.quantity,
+        enrolled_at: enrolledAt,
+      };
+    });
+
+    const { error: insertError } = await supabase.from('enrollments').insert(rowsToInsert);
 
     if (insertError) {
       setErrorMsg('บันทึกการลงทะเบียนไม่สำเร็จ: ' + insertError.message);
@@ -107,24 +145,24 @@ export default function EnrollPage() {
       return;
     }
 
-    // 2. อัปเดต stock ในตาราง courses ให้ลดลงตามจำนวนที่ลงทะเบียน
-    const { error: updateError } = await supabase
-      .from('courses')
-      .update({ stock: freshCourse.stock - qty })
-      .eq('id', freshCourse.id);
+    // อัปเดต stock ของแต่ละคอร์สที่ลงทะเบียนไป
+    for (const item of itemsToEnroll) {
+      const fresh = freshCourses.find((c) => c.id === item.course.id);
+      const { error: updateError } = await supabase
+        .from('courses')
+        .update({ stock: fresh.stock - item.quantity })
+        .eq('id', fresh.id);
 
-    if (updateError) {
-      // แจ้งเตือนกรณีอัปเดต stock ไม่สำเร็จ แม้ enrollment จะถูกบันทึกไปแล้ว
-      setErrorMsg(
-        'ลงทะเบียนสำเร็จ แต่ปรับปรุงที่นั่งคงเหลือไม่สำเร็จ: ' + updateError.message
-      );
-      setSubmitting(false);
-      await fetchCourses();
-      return;
+      if (updateError) {
+        setErrorMsg(
+          `ลงทะเบียนสำเร็จ แต่ปรับปรุงที่นั่งคงเหลือของ "${fresh.name}" ไม่สำเร็จ: ` +
+            updateError.message
+        );
+      }
     }
 
     setSuccessMsg(
-      `ลงทะเบียนคอร์ส "${freshCourse.name}" จำนวน ${qty} ${freshCourse.unit} สำเร็จ`
+      `ลงทะเบียนสำเร็จ ${itemsToEnroll.length} คอร์ส รวม ${totalSeats} ที่นั่ง`
     );
     resetForm();
     await fetchCourses();
@@ -133,7 +171,7 @@ export default function EnrollPage() {
 
   return (
     <div>
-      <h1 style={{ marginBottom: 20 }}>ลงทะเบียนเรียน</h1>
+      <h1 style={{ marginBottom: 16 }}>ลงทะเบียนเรียน</h1>
 
       {errorMsg && (
         <div
@@ -153,58 +191,105 @@ export default function EnrollPage() {
         </div>
       )}
 
+      {/* สรุปยอดรวม — วางไว้บนสุด ตัวใหญ่ อ่านง่าย เห็นทันทีก่อนกดยืนยัน */}
+      <div
+        className="card"
+        style={{
+          background: '#1a2332',
+          color: '#ffffff',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 12,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: '0.9rem', opacity: 0.8 }}>
+            เลือกแล้ว {selectedItems.length} คอร์ส / {totalSeats} ที่นั่ง
+          </div>
+          <div style={{ fontSize: '2rem', fontWeight: 800 }}>
+            {grandTotal.toLocaleString('th-TH')} บาท
+          </div>
+        </div>
+        <button
+          onClick={handleEnroll}
+          disabled={submitting || selectedItems.length === 0}
+          style={{ fontSize: '1.05rem', padding: '12px 24px' }}
+        >
+          {submitting ? 'กำลังบันทึก...' : 'ยืนยันลงทะเบียนทั้งหมด'}
+        </button>
+      </div>
+
+      {/* รายการคอร์สแบบเลือกได้หลายรายการ (checkbox + จำนวน) */}
       <div className="card">
         {loading ? (
           <p>กำลังโหลดรายการคอร์ส...</p>
+        ) : courses.length === 0 ? (
+          <p>ยังไม่มีคอร์สในระบบ</p>
         ) : (
-          <form onSubmit={handleEnroll}>
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ display: 'block', marginBottom: 6, fontWeight: 600 }}>
-                เลือกคอร์ส
-              </label>
-              <select
-                value={selectedCourseId}
-                onChange={(e) => setSelectedCourseId(e.target.value)}
-              >
-                <option value="">-- กรุณาเลือกคอร์ส --</option>
-                {courses.map((course) => (
-                  <option key={course.id} value={course.id}>
-                    {course.name} — {course.price} บาท (คงเหลือ {course.stock} {course.unit})
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {courses.map((course) => {
+              const isSelected = Boolean(selections[course.id]);
+              const outOfStock = course.stock <= 0;
+              const quantity = selections[course.id] || '';
 
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ display: 'block', marginBottom: 6, fontWeight: 600 }}>
-                จำนวนที่นั่ง
-              </label>
-              <input
-                type="number"
-                min="1"
-                placeholder="จำนวนที่นั่งที่ต้องการลงทะเบียน"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-              />
-            </div>
+              return (
+                <div
+                  key={course.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 16,
+                    padding: '12px 14px',
+                    borderRadius: 8,
+                    border: isSelected ? '2px solid #2563eb' : '1px solid #e4e7eb',
+                    background: isSelected ? '#eff4ff' : '#fafbfc',
+                    opacity: outOfStock ? 0.6 : 1,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    disabled={outOfStock}
+                    onChange={() => toggleCourse(course.id)}
+                    style={{ width: 18, height: 18 }}
+                  />
 
-            {/* แสดงยอดรวมแบบเรียลไทม์ก่อนยืนยัน */}
-            <div
-              style={{
-                marginBottom: 20,
-                padding: 12,
-                background: '#f0f2f5',
-                borderRadius: 6,
-                fontWeight: 600,
-              }}
-            >
-              ยอดรวม: {totalPrice.toLocaleString('th-TH')} บาท
-            </div>
+                  <div style={{ flex: '1 1 220px', minWidth: 180 }}>
+                    <div style={{ fontWeight: 700 }}>{course.name}</div>
+                    <div style={{ fontSize: '0.85rem', color: '#6b7280' }}>
+                      {course.price.toLocaleString('th-TH')} บาท / {course.unit} • คงเหลือ{' '}
+                      {course.stock} {course.unit}
+                    </div>
+                  </div>
 
-            <button type="submit" disabled={submitting}>
-              {submitting ? 'กำลังบันทึก...' : 'ยืนยันลงทะเบียน'}
-            </button>
-          </form>
+                  {isSelected && (
+                    <>
+                      <input
+                        type="number"
+                        min="1"
+                        max={course.stock}
+                        value={quantity}
+                        onChange={(e) => updateQuantity(course.id, e.target.value)}
+                        style={{ width: 90 }}
+                      />
+                      <div style={{ minWidth: 110, textAlign: 'right', fontWeight: 700 }}>
+                        {(course.price * (Number(quantity) || 0)).toLocaleString('th-TH')} บาท
+                      </div>
+                    </>
+                  )}
+
+                  {outOfStock && (
+                    <span style={{ color: '#dc2626', fontSize: '0.85rem', fontWeight: 600 }}>
+                      ที่นั่งเต็ม
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>
