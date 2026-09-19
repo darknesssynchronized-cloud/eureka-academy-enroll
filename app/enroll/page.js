@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabaseClient';
 
+const LOW_STOCK_THRESHOLD = 5;
+
 export default function EnrollPage() {
   const [courses, setCourses] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -80,6 +82,51 @@ export default function EnrollPage() {
     setSelections({});
   };
 
+  // ส่งข้อความแจ้งเตือนผ่าน API Route ภายใน (ไม่ยิงตรงไป Telegram จาก client)
+  // ทำงานแบบไม่บล็อกและไม่ทำให้ระบบขายล้มเหลว แม้ Telegram จะมีปัญหา
+  const sendTelegramNotification = async (message) => {
+    try {
+      const res = await fetch('/api/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        console.warn('ส่งแจ้งเตือน Telegram ไม่สำเร็จ:', data.error);
+      }
+    } catch (err) {
+      // ไม่ throw ต่อ เพื่อไม่ให้กระทบ flow การขาย
+      console.warn('เกิดข้อผิดพลาดขณะส่งแจ้งเตือน Telegram:', err.message);
+    }
+  };
+
+  // สร้างข้อความแจ้งเตือน "มีรายการขายใหม่"
+  const buildOrderMessage = (courseName, quantity, totalPrice, remainingStock) => {
+    const now = new Date().toLocaleString('th-TH', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+    return (
+      `🛍️ <b>มีรายการขายใหม่!</b>\n` +
+      `- สินค้า: ${courseName}\n` +
+      `- จำนวน: ${quantity} ชิ้น\n` +
+      `- ราคารวม: ${totalPrice.toLocaleString('th-TH')} บาท\n` +
+      `- สต๊อกคงเหลือปัจจุบัน: ${remainingStock} ชิ้น\n` +
+      `- เวลา: ${now}`
+    );
+  };
+
+  // สร้างข้อความแจ้งเตือน "สต๊อกใกล้หมด"
+  const buildLowStockMessage = (courseName, remainingStock) => {
+    return (
+      `🚨 <b>[เตือนภัย] สต๊อกสินค้าใกล้หมด!</b>\n` +
+      `- สินค้า: ${courseName}\n` +
+      `- คงเหลือเพียง: ${remainingStock} ชิ้น\n` +
+      `⚠️ กรุณาเติมสต๊อกสินค้าด่วน!`
+    );
+  };
+
   const handleEnroll = async (e) => {
     e.preventDefault();
     setErrorMsg('');
@@ -145,12 +192,14 @@ export default function EnrollPage() {
       return;
     }
 
-    // อัปเดต stock ของแต่ละคอร์สที่ลงทะเบียนไป
+    // อัปเดต stock ของแต่ละคอร์สที่ลงทะเบียนไป และยิงแจ้งเตือน Telegram
     for (const item of itemsToEnroll) {
       const fresh = freshCourses.find((c) => c.id === item.course.id);
+      const newStock = fresh.stock - item.quantity;
+
       const { error: updateError } = await supabase
         .from('courses')
-        .update({ stock: fresh.stock - item.quantity })
+        .update({ stock: newStock })
         .eq('id', fresh.id);
 
       if (updateError) {
@@ -158,6 +207,17 @@ export default function EnrollPage() {
           `ลงทะเบียนสำเร็จ แต่ปรับปรุงที่นั่งคงเหลือของ "${fresh.name}" ไม่สำเร็จ: ` +
             updateError.message
         );
+        continue; // ข้ามการแจ้งเตือนถ้าตัด stock ไม่สำเร็จ
+      }
+
+      // แจ้งเตือน Order ใหม่ (ยิงแบบไม่รอผล ไม่กระทบ flow หลัก)
+      sendTelegramNotification(
+        buildOrderMessage(fresh.name, item.quantity, fresh.price * item.quantity, newStock)
+      );
+
+      // ถ้าสต๊อกเหลือน้อย ยิงแจ้งเตือนเพิ่มอีก 1 ข้อความ
+      if (newStock <= LOW_STOCK_THRESHOLD) {
+        sendTelegramNotification(buildLowStockMessage(fresh.name, newStock));
       }
     }
 
