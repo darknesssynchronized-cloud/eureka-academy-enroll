@@ -1,16 +1,15 @@
-// API Route ฝั่ง server สำหรับส่งข้อความแจ้งเตือนเข้า Telegram
-// เก็บ token ไว้ฝั่ง server เท่านั้น ป้องกันไม่ให้หลุดไปที่ browser
-
+// API Route สำหรับส่งข้อความแจ้งเตือนไปยัง Telegram
+// รันฝั่ง server เท่านั้น จึงใช้ env var แบบไม่มี NEXT_PUBLIC_ ได้อย่างปลอดภัย
 export async function POST(request) {
   try {
-    const { text } = await request.json();
+    const { message } = await request.json();
 
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
     if (!botToken || !chatId) {
       return Response.json(
-        { ok: false, error: 'Telegram config ไม่ครบใน environment variables' },
+        { ok: false, error: 'ไม่ได้ตั้งค่า TELEGRAM_BOT_TOKEN หรือ TELEGRAM_CHAT_ID' },
         { status: 500 }
       );
     }
@@ -22,20 +21,19 @@ export async function POST(request) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text,
+          text: message,
           parse_mode: 'HTML',
         }),
       }
     );
 
     const data = await telegramRes.json();
-
-    if (!telegramRes.ok) {
-      return Response.json({ ok: false, error: data }, { status: 502 });
+    if (!data.ok) {
+      return Response.json({ ok: false, error: data.description }, { status: 502 });
     }
 
     return Response.json({ ok: true });
   } catch (err) {
-    return Response.json({ ok: false, error: String(err) }, { status: 500 });
+    return Response.json({ ok: false, error: err.message }, { status: 500 });
   }
 }
